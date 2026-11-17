@@ -15,10 +15,14 @@
     jaText: '__init__', // 現在表示中の日本語テキスト (変化検出用)
     mtMode: false, // 日本語トラックがなく機械翻訳で代用するモード
     mtCache: new Map(), // 機械翻訳キャッシュ (英キュー文 -> 日本語文)。動画ごとにクリア
-    mtPending: new Map() // 翻訳リクエスト中 (英キュー文 -> Promise)。二重リクエスト防止
+    mtPending: new Map(), // 翻訳リクエスト中 (英キュー文 -> Promise)。二重リクエスト防止
+    tracksLoading: false // 字幕トラック (キュー) を取得中かどうか
   };
 
-  var els = { overlay: null, note: null, en: null, ja: null, toast: null };
+  var els = { overlay: null, note: null, status: null, en: null, ja: null, toast: null };
+
+  // 日本語行が「翻訳待ち」を表す内部センチネル値 (state.jaText の比較用)
+  var MT_PENDING = '__mt_pending__';
 
   // ---------- inject.js をページへ差し込む ----------
   function injectMainWorld() {
@@ -115,15 +119,37 @@
     // 日本語トラックがある動画では従来どおり実トラックだけを使う。
     state.mtMode = !!enTrack && !jaTrack;
 
+    // 両トラックの取得が終わるまで「読み込み中」を表示する
+    state.tracksLoading = true;
+    updateStatus();
+    var enSettled = false;
+    var jaSettled = false;
+    function onSettle() {
+      if (enSettled && jaSettled) {
+        state.tracksLoading = false;
+        updateStatus();
+      }
+    }
+
     fetchCues(enTrack).then(function (cues) {
       if (state.videoId !== urlVideoId) return;
       state.enCues = cues;
       state.enIdx = -1;
+      enSettled = true;
+      onSettle();
     });
     fetchCues(jaTrack).then(function (cues) {
       if (state.videoId !== urlVideoId) return;
       state.jaCues = cues;
       state.jaText = '__init__';
+      // 日本語トラックが「ある」と報告されても中身が 0 件なら、
+      // 実質ないのと同じなので機械翻訳モードに切り替える
+      if (state.hasJaTrack && cues.length === 0 && state.hasEnTrack) {
+        state.mtMode = true;
+        if (state.enIdx >= 0) prefetchTranslations(state.enIdx);
+      }
+      jaSettled = true;
+      onSettle();
     });
     updateNote();
   }
@@ -132,13 +158,39 @@
   // 日本語トラックがない動画では、英語キューを Google 翻訳の無料エンドポイント
   // (キー不要) でその場翻訳して下段に表示する。全トラックを一括翻訳せず、
   // 表示中のキュー + 先行2キューだけをオンデマンドで翻訳する。
-  function translateCueText(text) {
-    if (!text) return;
-    if (state.mtCache.has(text) || state.mtPending.has(text)) return;
+  // 翻訳 fetch はまずサービスワーカー (background.js) に依頼する。
+  // コンテンツスクリプトからの直接 fetch はページの CORS 制約を受けるが、
+  // サービスワーカー経由なら host_permissions の範囲で確実に届く。
+  // ワーカーが失敗した場合だけ、従来どおり直接 fetch にフォールバックする。
+  function translateViaWorker(text) {
+    return new Promise(function (resolve) {
+      try {
+        chrome.runtime.sendMessage(
+          { type: 'DUALSUBS_TRANSLATE', text: text },
+          function (res) {
+            if (
+              chrome.runtime.lastError ||
+              !res ||
+              !res.ok ||
+              !res.translated
+            ) {
+              resolve(null);
+            } else {
+              resolve(res.translated);
+            }
+          }
+        );
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  }
+
+  function translateViaFetch(text) {
     var url =
       'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ja&dt=t&q=' +
       encodeURIComponent(text);
-    var p = fetch(url)
+    return fetch(url)
       .then(function (r) {
         return r.json();
       })
@@ -150,10 +202,26 @@
             if (seg && seg[0]) out += seg[0];
           });
         }
-        state.mtCache.set(text, out);
+        return out || null;
       })
       .catch(function () {
-        // 失敗したキューは日本語を空のままにする (字幕表示自体は壊さない)
+        return null;
+      });
+  }
+
+  function translateCueText(text) {
+    if (!text) return;
+    if (state.mtCache.has(text) || state.mtPending.has(text)) return;
+    var p = translateViaWorker(text)
+      .then(function (out) {
+        if (out) return out;
+        return translateViaFetch(text);
+      })
+      .then(function (out) {
+        // 両方失敗した場合だけ空でキャッシュする (字幕表示自体は壊さない)
+        state.mtCache.set(text, out || '');
+      })
+      .catch(function () {
         state.mtCache.set(text, '');
       })
       .then(function () {
@@ -177,6 +245,17 @@
   function ensureOverlay() {
     var player = document.getElementById('movie_player');
     if (!player) return;
+
+    // トーストはオーバーレイの外 (プレイヤー直下) に置く。
+    // オーバーレイを OFF にした瞬間の「字幕表示 OFF」も見えるようにするため。
+    if (!els.toast || !els.toast.isConnected) {
+      var toast = document.createElement('div');
+      toast.id = 'dualsubs-toast';
+      toast.style.display = 'none';
+      player.appendChild(toast);
+      els.toast = toast;
+    }
+
     if (els.overlay && els.overlay.isConnected) return;
 
     var overlay = document.createElement('div');
@@ -186,6 +265,10 @@
     note.className = 'ds-note';
     note.style.display = 'none';
 
+    var status = document.createElement('div');
+    status.className = 'ds-status';
+    status.style.display = 'none';
+
     var en = document.createElement('div');
     en.className = 'ds-en';
     en.style.display = 'none';
@@ -194,23 +277,20 @@
     ja.className = 'ds-ja';
     ja.style.display = 'none';
 
-    var toast = document.createElement('div');
-    toast.className = 'ds-toast';
-    toast.style.display = 'none';
-
     overlay.appendChild(note);
+    overlay.appendChild(status);
     overlay.appendChild(en);
     overlay.appendChild(ja);
-    overlay.appendChild(toast);
     player.appendChild(overlay);
 
     els.overlay = overlay;
     els.note = note;
+    els.status = status;
     els.en = en;
     els.ja = ja;
-    els.toast = toast;
     applyEnabled();
     updateNote();
+    updateStatus();
   }
 
   function updateNote() {
@@ -221,6 +301,14 @@
     }
     els.note.textContent = msg;
     els.note.style.display = msg ? '' : 'none';
+  }
+
+  // 字幕トラック取得中は「字幕を読み込み中…」を出し、終わったら消す
+  function updateStatus() {
+    if (!els.status) return;
+    var msg = state.tracksLoading ? '字幕を読み込み中…' : '';
+    els.status.textContent = msg;
+    els.status.style.display = msg ? '' : 'none';
   }
 
   // プレイヤー右下コントロールに「日英」トグルボタンを追加する
@@ -237,6 +325,7 @@
     btn.addEventListener('click', function () {
       state.enabled = !state.enabled;
       applyEnabled();
+      showToast(state.enabled ? '字幕表示 ON' : '字幕表示 OFF');
     });
     controls.insertBefore(btn, controls.firstChild);
     applyEnabled();
@@ -247,7 +336,11 @@
       els.overlay.style.display = state.enabled ? '' : 'none';
     }
     var btn = document.getElementById('dualsubs-toggle');
-    if (btn) btn.classList.toggle('ds-off', !state.enabled);
+    if (btn) {
+      // ON = 白地に黒文字 + 青ライン、OFF = 半透明。一目で状態が分かるようにする
+      btn.classList.toggle('ds-on', state.enabled);
+      btn.classList.toggle('ds-off', !state.enabled);
+    }
   }
 
   var toastTimer = null;
@@ -283,13 +376,18 @@
   function currentJaText(t) {
     if (state.hasJaTrack) {
       var idx = findCue(state.jaCues, t);
-      return idx >= 0 ? state.jaCues[idx].text : '';
+      if (idx >= 0) return state.jaCues[idx].text;
+      // 実トラックに重なるキューがない場合は、下の機械翻訳フォールバックへ
     }
     if (state.mtMode) {
-      // 機械翻訳モード: 現在の英語キューに対応する翻訳 (未取得なら空)
+      // 機械翻訳モード: 現在の英語キューに対応する翻訳を返す。
+      // まだ届いていなければ MT_PENDING を返し、表示側で「翻訳中…」にする。
+      // (翻訳が失敗して空でキャッシュ済みの場合は空のまま)
       var eIdx = state.enCues.length ? findCue(state.enCues, t) : -1;
       if (eIdx < 0) return '';
-      return state.mtCache.get(state.enCues[eIdx].text) || '';
+      var text = state.enCues[eIdx].text;
+      if (state.mtCache.has(text)) return state.mtCache.get(text);
+      return MT_PENDING;
     }
     return '';
   }
@@ -347,8 +445,16 @@
     var ja = currentJaText(t);
     if (ja !== state.jaText) {
       state.jaText = ja;
-      els.ja.textContent = ja;
-      els.ja.style.display = ja ? '' : 'none';
+      if (ja === MT_PENDING) {
+        // 翻訳待ちの間は空白にせず、薄く「翻訳中…」と出す
+        els.ja.textContent = '翻訳中…';
+        els.ja.classList.add('ds-ja-pending');
+        els.ja.style.display = '';
+      } else {
+        els.ja.textContent = ja;
+        els.ja.classList.remove('ds-ja-pending');
+        els.ja.style.display = ja ? '' : 'none';
+      }
     }
   }
 
@@ -364,7 +470,12 @@
       word: word,
       display: display,
       sentence: cue.text,
-      japanese: state.jaText && state.jaText !== '__init__' ? state.jaText : '',
+      japanese:
+        state.jaText &&
+        state.jaText !== '__init__' &&
+        state.jaText !== MT_PENDING
+          ? state.jaText
+          : '',
       timeSec: timeSec,
       videoId: state.videoId,
       videoTitle: getTitle(),
@@ -424,6 +535,7 @@
     state.mtMode = false;
     state.mtCache.clear();
     state.mtPending.clear();
+    state.tracksLoading = false;
     requestTracks();
   });
   setInterval(function () {
@@ -438,6 +550,7 @@
       state.mtMode = false;
       state.mtCache.clear();
       state.mtPending.clear();
+      state.tracksLoading = false;
       requestTracks();
     }
   }, 1000);
