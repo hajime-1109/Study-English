@@ -24,16 +24,10 @@
   // 日本語行が「翻訳待ち」を表す内部センチネル値 (state.jaText の比較用)
   var MT_PENDING = '__mt_pending__';
 
-  // ---------- inject.js をページへ差し込む ----------
-  function injectMainWorld() {
-    var s = document.createElement('script');
-    s.src = chrome.runtime.getURL('inject.js');
-    s.onload = function () {
-      s.remove();
-    };
-    (document.head || document.documentElement).appendChild(s);
-  }
-
+  // inject.js は manifest の content_scripts で "world": "MAIN" 指定により
+  // ページのメインワールドへ直接読み込まれる (script タグ差し込みはしない。
+  // Brave 等で chrome-extension:// の読み込みがブロックされるため)。
+  // 連携は window.postMessage 経由。
   function requestTracks() {
     window.postMessage({ type: 'DUALSUBS_REQUEST' }, window.location.origin);
   }
@@ -555,7 +549,6 @@
     }
   }, 1000);
 
-  injectMainWorld();
   requestTracks();
   setInterval(syncLoop, 100);
 })();

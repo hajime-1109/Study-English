@@ -56,7 +56,7 @@ Language Reactor のような「二言語字幕で学ぶ」という発想を参
 ## ファイル構成
 
 - `manifest.json` — 拡張機能の定義（Manifest V3）
-- `inject.js` — ページ側で字幕トラック情報を取得して渡すスクリプト
+- `inject.js` — ページ側（メインワールド）で字幕トラック情報を取得して渡すスクリプト。manifest の `content_scripts` で `"world": "MAIN"` を指定して読み込む（script タグでの差し込みは Brave 等でブロックされるため使わない）
 - `content.js` — 字幕の取得・同期表示、単語保存の本体
 - `background.js` — 機械翻訳のリクエストを中継するサービスワーカー
 - `content.css` — 字幕オーバーレイのスタイル
