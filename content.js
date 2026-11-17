@@ -12,7 +12,10 @@
     hasEnTrack: false,
     enabled: true, // オーバーレイ表示 ON/OFF
     enIdx: -1, // 現在表示中の英キュー番号
-    jaText: '__init__' // 現在表示中の日本語テキスト (変化検出用)
+    jaText: '__init__', // 現在表示中の日本語テキスト (変化検出用)
+    mtMode: false, // 日本語トラックがなく機械翻訳で代用するモード
+    mtCache: new Map(), // 機械翻訳キャッシュ (英キュー文 -> 日本語文)。動画ごとにクリア
+    mtPending: new Map() // 翻訳リクエスト中 (英キュー文 -> Promise)。二重リクエスト防止
   };
 
   var els = { overlay: null, note: null, en: null, ja: null, toast: null };
@@ -101,11 +104,16 @@
     state.videoId = urlVideoId;
     state.enIdx = -1;
     state.jaText = '__init__';
+    state.mtCache.clear();
+    state.mtPending.clear();
 
     var enTrack = pickTrack(msg.tracks, 'en');
     var jaTrack = pickTrack(msg.tracks, 'ja');
     state.hasEnTrack = !!enTrack;
     state.hasJaTrack = !!jaTrack;
+    // 英語トラックはあるが日本語トラックがない場合だけ機械翻訳モードにする。
+    // 日本語トラックがある動画では従来どおり実トラックだけを使う。
+    state.mtMode = !!enTrack && !jaTrack;
 
     fetchCues(enTrack).then(function (cues) {
       if (state.videoId !== urlVideoId) return;
@@ -118,6 +126,51 @@
       state.jaText = '__init__';
     });
     updateNote();
+  }
+
+  // ---------- 機械翻訳フォールバック ----------
+  // 日本語トラックがない動画では、英語キューを Google 翻訳の無料エンドポイント
+  // (キー不要) でその場翻訳して下段に表示する。全トラックを一括翻訳せず、
+  // 表示中のキュー + 先行2キューだけをオンデマンドで翻訳する。
+  function translateCueText(text) {
+    if (!text) return;
+    if (state.mtCache.has(text) || state.mtPending.has(text)) return;
+    var url =
+      'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ja&dt=t&q=' +
+      encodeURIComponent(text);
+    var p = fetch(url)
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (data) {
+        // 応答形式: data[0] = [[訳文の一部, 原文の一部, ...], ...]
+        var out = '';
+        if (data && Array.isArray(data[0])) {
+          data[0].forEach(function (seg) {
+            if (seg && seg[0]) out += seg[0];
+          });
+        }
+        state.mtCache.set(text, out);
+      })
+      .catch(function () {
+        // 失敗したキューは日本語を空のままにする (字幕表示自体は壊さない)
+        state.mtCache.set(text, '');
+      })
+      .then(function () {
+        state.mtPending.delete(text);
+        // 翻訳が遅れて届いた場合に備え、変化検出をリセットして
+        // 次の同期ループ (100ms周期) で日本語行を再描画させる
+        state.jaText = '__init__';
+      });
+    state.mtPending.set(text, p);
+  }
+
+  // 現在のキューと先行2キューの翻訳を先読みする
+  function prefetchTranslations(idx) {
+    if (!state.mtMode) return;
+    for (var i = idx; i <= idx + 2 && i < state.enCues.length; i++) {
+      if (i >= 0) translateCueText(state.enCues[i].text);
+    }
   }
 
   // ---------- オーバーレイ UI ----------
@@ -165,8 +218,6 @@
     var msg = '';
     if (state.videoId && !state.hasEnTrack) {
       msg = 'DualSubs: 英語字幕がありません';
-    } else if (state.videoId && state.hasEnTrack && !state.hasJaTrack) {
-      msg = 'DualSubs: 日本語字幕がないため英語のみ表示します';
     }
     els.note.textContent = msg;
     els.note.style.display = msg ? '' : 'none';
@@ -230,8 +281,17 @@
   }
 
   function currentJaText(t) {
-    var idx = findCue(state.jaCues, t);
-    return idx >= 0 ? state.jaCues[idx].text : '';
+    if (state.hasJaTrack) {
+      var idx = findCue(state.jaCues, t);
+      return idx >= 0 ? state.jaCues[idx].text : '';
+    }
+    if (state.mtMode) {
+      // 機械翻訳モード: 現在の英語キューに対応する翻訳 (未取得なら空)
+      var eIdx = state.enCues.length ? findCue(state.enCues, t) : -1;
+      if (eIdx < 0) return '';
+      return state.mtCache.get(state.enCues[eIdx].text) || '';
+    }
+    return '';
   }
 
   // 英字幕を単語ごとのクリック可能な span として描画する
@@ -276,6 +336,8 @@
       state.enIdx = idx;
       if (idx >= 0) {
         renderEnCue(state.enCues[idx]);
+        // 機械翻訳モードでは、このキューと先行2キューを翻訳しておく
+        prefetchTranslations(idx);
       } else {
         els.en.textContent = '';
         els.en.style.display = 'none';
@@ -359,6 +421,9 @@
     state.jaCues = [];
     state.enIdx = -1;
     state.jaText = '__init__';
+    state.mtMode = false;
+    state.mtCache.clear();
+    state.mtPending.clear();
     requestTracks();
   });
   setInterval(function () {
@@ -370,6 +435,9 @@
       state.jaCues = [];
       state.enIdx = -1;
       state.jaText = '__init__';
+      state.mtMode = false;
+      state.mtCache.clear();
+      state.mtPending.clear();
       requestTracks();
     }
   }, 1000);
