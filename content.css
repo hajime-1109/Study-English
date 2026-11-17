@@ -1,0 +1,90 @@
+/* DualSubs / content.css — 字幕オーバーレイとトグルボタンのスタイル */
+
+#dualsubs-overlay {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 76px;
+  width: 94%;
+  max-width: 920px;
+  text-align: center;
+  z-index: 60;
+  pointer-events: none; /* コンテナ自体はクリックを透過させる */
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+}
+
+#dualsubs-overlay .ds-en {
+  display: inline-block;
+  background: rgba(0, 0, 0, 0.68);
+  border-radius: 8px;
+  padding: 4px 14px;
+  color: #ffffff;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+}
+
+#dualsubs-overlay .ds-ja {
+  display: inline-block;
+  margin-top: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 8px;
+  padding: 3px 12px;
+  color: #fff3b0;
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+}
+
+#dualsubs-overlay .ds-note {
+  display: inline-block;
+  margin-bottom: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 6px;
+  padding: 2px 10px;
+  color: #dddddd;
+  font-size: 12px;
+}
+
+/* 単語だけはクリックできるようにする */
+#dualsubs-overlay .ds-word {
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background-color 0.15s ease;
+}
+
+#dualsubs-overlay .ds-word:hover {
+  background: rgba(255, 213, 79, 0.45);
+}
+
+#dualsubs-overlay .ds-word.ds-saved {
+  background: rgba(76, 175, 80, 0.6);
+}
+
+#dualsubs-overlay .ds-toast {
+  display: inline-block;
+  margin-top: 6px;
+  background: rgba(30, 30, 30, 0.85);
+  border-radius: 999px;
+  padding: 3px 14px;
+  color: #ffffff;
+  font-size: 13px;
+}
+
+/* プレイヤーコントロール内のトグルボタン */
+.dualsubs-toggle {
+  width: auto !important;
+  min-width: 44px;
+  padding: 0 8px !important;
+  font-size: 13px;
+  font-weight: 700;
+  color: #ffffff;
+  vertical-align: top;
+}
+
+.dualsubs-toggle.ds-off {
+  opacity: 0.45;
+}

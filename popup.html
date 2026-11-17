@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>DualSubs 単語帳</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>DualSubs 単語帳</h1>
+    <span id="count"></span>
+  </header>
+
+  <div class="actions">
+    <button id="export-btn" type="button">CSV出力</button>
+    <button id="clear-btn" type="button" class="danger">全削除</button>
+  </div>
+
+  <ul id="list"></ul>
+  <p id="empty" class="empty">
+    まだ単語が保存されていません。<br>
+    YouTube の英字幕に出てきた単語をクリックすると、ここに保存されます。
+  </p>
+
+  <script src="popup.js"></script>
+</body>
+</html>
