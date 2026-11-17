@@ -16,7 +16,9 @@
     mtMode: false, // 日本語トラックがなく機械翻訳で代用するモード
     mtCache: new Map(), // 機械翻訳キャッシュ (英キュー文 -> 日本語文)。動画ごとにクリア
     mtPending: new Map(), // 翻訳リクエスト中 (英キュー文 -> Promise)。二重リクエスト防止
-    tracksLoading: false // 字幕トラック (キュー) を取得中かどうか
+    tracksLoading: false, // 字幕トラック (キュー) を取得中かどうか
+    statusText: '', // ステータス表示にそのまま出す文言 (取得中・失敗など)
+    pageFetchFor: null // 視聴ページHTMLの取得を開始済みの動画ID (二重取得防止)
   };
 
   var els = { overlay: null, note: null, status: null, en: null, ja: null, toast: null };
@@ -24,12 +26,95 @@
   // 日本語行が「翻訳待ち」を表す内部センチネル値 (state.jaText の比較用)
   var MT_PENDING = '__mt_pending__';
 
-  // inject.js は manifest の content_scripts で "world": "MAIN" 指定により
-  // ページのメインワールドへ直接読み込まれる (script タグ差し込みはしない。
-  // Brave 等で chrome-extension:// の読み込みがブロックされるため)。
-  // 連携は window.postMessage 経由。
-  function requestTracks() {
-    window.postMessage({ type: 'DUALSUBS_REQUEST' }, window.location.origin);
+  // ---------- 字幕トラック情報の取得 (視聴ページHTMLのパース方式) ----------
+  // メインワールドのスクリプトとの postMessage 連携は Brave で届かない
+  // ケースがあったため、視聴ページの HTML に埋め込まれた
+  // ytInitialPlayerResponse を直接パースする方式に切り替えた (v1.3.0)。
+  // ページ側の JS には一切依存しないので、ブラウザ差異の影響を受けない。
+  function setStatus(text) {
+    state.statusText = text;
+    updateStatus();
+  }
+
+  // text[startIdx] の '{' から対応する '}' までを、文字列リテラルを
+  // 考慮しながら切り出す
+  function extractJsonObject(text, startIdx) {
+    var depth = 0;
+    var inStr = false;
+    var esc = false;
+    for (var i = startIdx; i < text.length; i++) {
+      var c = text[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === '\\') esc = true;
+        else if (c === '"') inStr = false;
+      } else {
+        if (c === '"') inStr = true;
+        else if (c === '{') depth++;
+        else if (c === '}') {
+          depth--;
+          if (depth === 0) return text.slice(startIdx, i + 1);
+        }
+      }
+    }
+    return null;
+  }
+
+  function loadTracksFor(videoId) {
+    if (!videoId) return;
+    if (state.pageFetchFor === videoId) return;
+    state.pageFetchFor = videoId;
+    setStatus('字幕情報を取得中…');
+    fetch('https://www.youtube.com/watch?v=' + videoId, {
+      credentials: 'same-origin'
+    })
+      .then(function (r) {
+        return r.text();
+      })
+      .then(function (html) {
+        if (getVideoIdFromUrl() !== videoId) return;
+        var marker = 'ytInitialPlayerResponse';
+        var at = html.indexOf(marker);
+        var json = null;
+        if (at >= 0) {
+          var brace = html.indexOf('{', at + marker.length);
+          if (brace >= 0) {
+            var raw = extractJsonObject(html, brace);
+            if (raw) {
+              try {
+                json = JSON.parse(raw);
+              } catch (e) {
+                json = null;
+              }
+            }
+          }
+        }
+        var renderer =
+          json &&
+          json.captions &&
+          json.captions.playerCaptionsTracklistRenderer;
+        var tracks = (renderer && renderer.captionTracks) || [];
+        if (!tracks.length) {
+          setStatus('DualSubs: 字幕トラックが見つかりませんでした');
+          return;
+        }
+        handleTracks({
+          type: 'DUALSUBS_TRACKS',
+          videoId: videoId,
+          tracks: tracks.map(function (t) {
+            return {
+              baseUrl: t.baseUrl,
+              languageCode: t.languageCode,
+              kind: t.kind || '',
+              name: (t.name && t.name.simpleText) || ''
+            };
+          })
+        });
+      })
+      .catch(function () {
+        if (getVideoIdFromUrl() !== videoId) return;
+        setStatus('DualSubs: 字幕情報の取得に失敗しました');
+      });
   }
 
   // ---------- URL / 動画情報 ----------
@@ -114,6 +199,7 @@
     state.mtMode = !!enTrack && !jaTrack;
 
     // 両トラックの取得が終わるまで「読み込み中」を表示する
+    state.statusText = '';
     state.tracksLoading = true;
     updateStatus();
     var enSettled = false;
@@ -297,10 +383,13 @@
     els.note.style.display = msg ? '' : 'none';
   }
 
-  // 字幕トラック取得中は「字幕を読み込み中…」を出し、終わったら消す
+  // 取得中・失敗などの状態をそのまま見せる (statusText 優先、
+  // なければキュー取得中の「字幕を読み込み中…」)
   function updateStatus() {
     if (!els.status) return;
-    var msg = state.tracksLoading ? '字幕を読み込み中…' : '';
+    var msg =
+      state.statusText ||
+      (state.tracksLoading ? '字幕を読み込み中…' : '');
     els.status.textContent = msg;
     els.status.style.display = msg ? '' : 'none';
   }
@@ -530,7 +619,9 @@
     state.mtCache.clear();
     state.mtPending.clear();
     state.tracksLoading = false;
-    requestTracks();
+    state.pageFetchFor = null;
+    state.statusText = '';
+    loadTracksFor(getVideoIdFromUrl());
   });
   setInterval(function () {
     var vid = getVideoIdFromUrl();
@@ -545,10 +636,12 @@
       state.mtCache.clear();
       state.mtPending.clear();
       state.tracksLoading = false;
-      requestTracks();
+      state.pageFetchFor = null;
+      state.statusText = '';
+      loadTracksFor(getVideoIdFromUrl());
     }
   }, 1000);
 
-  requestTracks();
+  loadTracksFor(getVideoIdFromUrl());
   setInterval(syncLoop, 100);
 })();
